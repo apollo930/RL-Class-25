@@ -55,11 +55,20 @@ TARGET_KL = 0.02
 GUIDE_PROB_START = 1.0
 BC_COEF_START = 1.0
 PRETRAIN_STEPS = 3000
-PRETRAIN_UPDATES = 3000
+PRETRAIN_UPDATES = 2800
 PRETRAIN_BATCH_SIZE = 2048
-PRETRAIN_LR = 1e-2
-EARLY_STOP_REWARD = 5.0
+PRETRAIN_LR = 1e-3
+EARLY_STOP_REWARD = 14.0
 EARLY_STOP_CONSEC_EVALS = 2
+
+
+def ppo_lr_schedule(base_lr: float, progress: float) -> float:
+    """Piecewise LR schedule: high early learning, safer late optimization."""
+    if progress < 0.4:
+        return base_lr
+    if progress < 0.7:
+        return base_lr * 0.3
+    return base_lr * 0.1
 
 
 def heuristic_pong_action(obs: torch.Tensor) -> torch.Tensor:
@@ -214,9 +223,8 @@ def train():
     num_rollouts = TOTAL_TIMESTEPS // (NUM_STEPS * NUM_ENVS)
 
     for rollout_idx in range(num_rollouts):
-        # Linear LR annealing is a standard PPO stability trick.
-        frac = 1.0 - (rollout_idx / num_rollouts)
-        optimizer.param_groups[0]["lr"] = LR * frac
+        progress = rollout_idx / max(1, num_rollouts - 1)
+        optimizer.param_groups[0]["lr"] = ppo_lr_schedule(LR, progress)
 
         buffer.reset()
         completed_rewards = []
@@ -224,7 +232,9 @@ def train():
 
         for _ in range(NUM_STEPS):
             obs_t = torch.tensor(obs, dtype=torch.float32, device=DEVICE)
-            guide_prob = GUIDE_PROB_START
+            guide_horizon = max(1.0, 0.55 * num_rollouts)
+            guide_decay = max(0.0, 1.0 - (rollout_idx / guide_horizon))
+            guide_prob = GUIDE_PROB_START * guide_decay
 
             with torch.no_grad():
                 logits, value = model(obs_t)
@@ -293,7 +303,8 @@ def train():
                 ).mean()
                 entropy_bonus = compute_entropy_bonus(torch.softmax(logits, dim=-1))
                 bc_targets = heuristic_pong_action(batch["obs"])
-                bc_coef = BC_COEF_START
+                bc_horizon = max(1.0, 0.35 * num_rollouts)
+                bc_coef = BC_COEF_START * max(0.0, 1.0 - (rollout_idx / bc_horizon))
                 bc_loss = F.cross_entropy(logits, bc_targets)
 
                 loss = (
