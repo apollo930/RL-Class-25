@@ -143,18 +143,13 @@ def load_transition_tables():
     return P, R, D
 
 
-# =============================================================================
-# TODO: IMPLEMENT THE FUNCTION BELOW
-# =============================================================================
-
-
 def q_iteration(
     P: np.ndarray,
     R: np.ndarray,
     D: np.ndarray,
-    gamma: float = 0.99,
-    theta: float = 1e-6,
-    max_iterations: int = 1000,
+    gamma: float = 0.999,
+    theta: float = 1e-10,
+    max_iterations: int = 20000,
 ) -> np.ndarray:
     """
     Perform Q-iteration (value iteration on Q-function).
@@ -192,7 +187,24 @@ def q_iteration(
     Hint: You can vectorize this for efficiency, but a loop-based
     implementation is also fast for this small state space.
     """
-    raise NotImplementedError("Implement q_iteration")
+    q = np.zeros((200, 200, 3), dtype=np.float64)
+    q_new = np.empty_like(q)
+
+    next_s0 = P[..., 0]
+    next_s1 = P[..., 1]
+    not_done = 1.0 - D
+    
+    for _ in range(max_iterations):
+        q_next = q[next_s0, next_s1]
+        q_next_max = np.max(q_next, axis=-1)
+        q_new[:] = R + gamma * not_done * q_next_max
+
+        delta = np.max(np.abs(q_new - q))
+        q, q_new = q_new, q
+        if delta < theta:
+            break
+
+    return q
 
 
 # =============================================================================
@@ -247,7 +259,8 @@ if __name__ == "__main__":
 
     # Run Q-iteration
     print("\nRunning Q-iteration...")
-    q_table = q_iteration(P, R, D, gamma=0.99)
+
+    q_table = q_iteration(P, R, D, gamma=0.99999, theta=1e-10, max_iterations=100000)
 
     # Save the Q-table
     save_q_table(q_table)
@@ -258,4 +271,4 @@ if __name__ == "__main__":
 
     # Watch the trained agent
     print("\nWatching trained agent...")
-    evaluate(q_table, num_episodes=3, render=True)
+    evaluate(q_table, num_episodes=10000, render=True)

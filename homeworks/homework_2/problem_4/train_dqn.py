@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import matplotlib
 import gymnasium as gym
+import random
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -39,17 +40,22 @@ from homeworks.homework_2.problem_2.dqn_components import (  # noqa: F401
 # Hyperparameters (tuned — you shouldn't need to change these)
 # =============================================================================
 TOTAL_TIMESTEPS = 200_000
-LR = 1e-3
-BATCH_SIZE = 128
-BUFFER_CAPACITY = 10_000
+LR = 3e-4
+BATCH_SIZE = 256
+BUFFER_CAPACITY = 100_000
 GAMMA = 0.99
 N_STEP = 3  # n-step returns for better credit assignment
 EPSILON_START = 1.0
 EPSILON_END = 0.05
-EPSILON_DECAY_STEPS = 10_000
-TARGET_UPDATE_FREQ = 500  # steps between hard target updates
-LEARNING_STARTS = 1_000  # fill buffer before training
-TRAIN_FREQ = 4  # train every N env steps
+EPSILON_DECAY_STEPS = 50_000
+TARGET_UPDATE_FREQ = 1_000  # steps between hard target updates
+LEARNING_STARTS = 5_000  # fill buffer before training
+TRAIN_FREQ = 1  # train every N env steps
+EVAL_FREQ_STEPS = 10_000
+EVAL_EPISODES = 20
+SEED = 42
+EARLY_STOP_REWARD = 500.0
+EARLY_STOP_CONSEC_EVALS = 2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -112,7 +118,138 @@ def train():
     Returns:
         List of episode rewards (one per completed episode).
     """
-    raise NotImplementedError("Implement train()")
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+
+    env = gym.make("CartPole-v1")
+
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
+
+    online_network = QNetwork(state_dim=obs_dim, action_dim=act_dim).to(DEVICE)
+    target_network = QNetwork(state_dim=obs_dim, action_dim=act_dim).to(DEVICE)
+    hard_update(online_network, target_network)
+
+    optimizer = torch.optim.Adam(online_network.parameters(), lr=LR, eps=1e-5)
+    replay_buffer = NStepReplayBuffer(
+        capacity=BUFFER_CAPACITY,
+        n_step=N_STEP,
+        gamma=GAMMA,
+    )
+
+    obs, _ = env.reset(seed=SEED)
+    episode_reward = 0.0
+    reward_history = []
+    best_eval_reward = -float("inf")
+    eval_success_streak = 0
+
+    for step in range(TOTAL_TIMESTEPS):
+        epsilon = linear_epsilon_decay(
+            step=step,
+            epsilon_start=EPSILON_START,
+            epsilon_end=EPSILON_END,
+            decay_steps=EPSILON_DECAY_STEPS,
+        )
+
+        obs_t = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        with torch.no_grad():
+            q_values = online_network(obs_t)
+        action = epsilon_greedy_action(q_values, epsilon=epsilon, num_actions=act_dim)
+
+        next_obs, reward, term, trunc, _ = env.step(action)
+        done = term or trunc
+
+        # For TD targets, treat only true environment terminal states as done.
+        # Time-limit truncations are non-terminal and should bootstrap.
+        done_for_target = bool(term)
+
+        replay_buffer.push(obs, action, reward, next_obs, done_for_target)
+
+        obs = next_obs
+        episode_reward += reward
+
+        if (
+            step >= LEARNING_STARTS
+            and step % TRAIN_FREQ == 0
+            and len(replay_buffer) >= BATCH_SIZE
+        ):
+            batch = replay_buffer.sample(BATCH_SIZE)
+            states, actions, rewards, next_states, dones = batch_to_tensors(batch, DEVICE)
+
+            td_targets = compute_double_dqn_target(
+                rewards=rewards,
+                next_states=next_states,
+                dones=dones,
+                gamma=GAMMA**N_STEP,
+                online_network=online_network,
+                target_network=target_network,
+            )
+
+            q_values = online_network(states)
+            loss = compute_td_loss(
+                q_values=q_values,
+                actions=actions,
+                td_targets=td_targets,
+                loss_type="huber",
+            )
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(online_network.parameters(), max_norm=10.0)
+            optimizer.step()
+
+        if step % TARGET_UPDATE_FREQ == 0:
+            hard_update(online_network, target_network)
+
+        if done:
+            reward_history.append(episode_reward)
+            episode_reward = 0.0
+            obs, _ = env.reset()
+
+            if len(reward_history) % 20 == 0:
+                recent_mean = float(np.mean(reward_history[-20:]))
+                print(
+                    f"Step {step + 1}/{TOTAL_TIMESTEPS} | "
+                    f"Episodes {len(reward_history)} | "
+                    f"Recent mean reward: {recent_mean:.1f}"
+                )
+
+        should_eval = ((step + 1) % EVAL_FREQ_STEPS == 0) or (
+            step + 1 == TOTAL_TIMESTEPS
+        )
+        if should_eval:
+            eval_reward = evaluate(online_network, num_episodes=EVAL_EPISODES)
+            print(
+                f"Eval @ step {step + 1}: "
+                f"mean reward {eval_reward:.1f}"
+            )
+            if eval_reward > best_eval_reward:
+                best_eval_reward = eval_reward
+                torch.save(online_network.state_dict(), "checkpoint.pt")
+                print(
+                    f"New best checkpoint saved: {best_eval_reward:.1f} "
+                    "(checkpoint.pt)"
+                )
+
+            if eval_reward >= EARLY_STOP_REWARD:
+                eval_success_streak += 1
+            else:
+                eval_success_streak = 0
+
+            if eval_success_streak >= EARLY_STOP_CONSEC_EVALS:
+                print(
+                    "Early stopping DQN training: "
+                    f"eval reward >= {EARLY_STOP_REWARD} for "
+                    f"{EARLY_STOP_CONSEC_EVALS} consecutive evals."
+                )
+                break
+
+    torch.save(online_network.state_dict(), "dqn_cartpole.pt")
+    if best_eval_reward == -float("inf"):
+        torch.save(online_network.state_dict(), "checkpoint.pt")
+    env.close()
+    return reward_history
 
 
 # =============================================================================
@@ -122,10 +259,10 @@ if __name__ == "__main__":
     reward_history = train()
     plot_learning_curve(reward_history)
 
-    # Load the final model for evaluation
+    # Evaluate the best checkpoint selected during training.
     obs_dim = 4
     act_dim = 2
     model = QNetwork(state_dim=obs_dim, action_dim=act_dim).to(DEVICE)
-    model.load_state_dict(torch.load("dqn_cartpole.pt", weights_only=True))
+    model.load_state_dict(torch.load("checkpoint.pt", weights_only=True))
     mean_reward = evaluate(model)
     print(f"Evaluation mean reward: {mean_reward:.1f}")

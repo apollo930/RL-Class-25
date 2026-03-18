@@ -18,10 +18,13 @@ Based on the original DQN paper and Double DQN:
 """
 
 from typing import List, NamedTuple, Tuple
+from collections import deque
+import random
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 # =============================================================================
@@ -59,8 +62,8 @@ class ReplayBuffer:
         Args:
             capacity: Maximum number of transitions to store
         """
-        # TODO: Implement this
-        raise NotImplementedError("Implement ReplayBuffer.__init__")
+        self.capacity = capacity
+        self.buffer = deque(maxlen=capacity)
 
     def push(
         self,
@@ -81,8 +84,7 @@ class ReplayBuffer:
             done: Whether the episode ended
 
         """
-        # TODO: Implement this
-        raise NotImplementedError("Implement ReplayBuffer.push")
+        self.buffer.append(Transition(state, action, reward, next_state, done))
 
     def sample(self, batch_size: int) -> List[Transition]:
         """
@@ -98,13 +100,11 @@ class ReplayBuffer:
             - Sample without replacement (each transition appears at most once)
             - If batch_size > len(buffer), this will raise an error (expected)
         """
-        # TODO: Implement this
-        raise NotImplementedError("Implement ReplayBuffer.sample")
+        return random.sample(self.buffer, batch_size)
 
     def __len__(self) -> int:
         """Return the current number of transitions in the buffer."""
-        # TODO: Implement this
-        raise NotImplementedError("Implement ReplayBuffer.__len__")
+        return len(self.buffer)
 
 
 class NStepReplayBuffer:
@@ -136,8 +136,10 @@ class NStepReplayBuffer:
             n_step: Number of steps for n-step returns
             gamma: Discount factor for computing n-step returns
         """
-        # TODO: Implement this
-        raise NotImplementedError("Implement NStepReplayBuffer.__init__")
+        self.buffer = ReplayBuffer(capacity)
+        self.n_step = n_step
+        self.gamma = gamma
+        self.nstep_buffer = deque(maxlen=n_step)
 
     def push(
         self,
@@ -160,8 +162,31 @@ class NStepReplayBuffer:
             3. Else if the n-step buffer is full (length == n_step):
                Compute the n-step return, pop the oldest transition, and push to main buffer.
         """
-        # TODO: Implement this
-        raise NotImplementedError("Implement NStepReplayBuffer.push")
+        self.nstep_buffer.append(Transition(state, action, reward, next_state, done))
+
+        if done:
+            while len(self.nstep_buffer) > 0:
+                n_step_return, nth_state, nth_done = self._compute_nstep()
+                oldest = self.nstep_buffer.popleft()
+                self.buffer.push(
+                    oldest.state,
+                    oldest.action,
+                    n_step_return,
+                    nth_state,
+                    nth_done,
+                )
+            return
+
+        if len(self.nstep_buffer) == self.n_step:
+            n_step_return, nth_state, nth_done = self._compute_nstep()
+            oldest = self.nstep_buffer.popleft()
+            self.buffer.push(
+                oldest.state,
+                oldest.action,
+                n_step_return,
+                nth_state,
+                nth_done,
+            )
 
     def _compute_nstep(self):
         """
@@ -172,8 +197,18 @@ class NStepReplayBuffer:
             nth_state: The state at the end of the n-step sequence
             nth_done: Whether the episode ended within the sequence
         """
-        # TODO: Implement this
-        raise NotImplementedError("Implement NStepReplayBuffer._compute_nstep")
+        n_step_return = 0.0
+        nth_state = self.nstep_buffer[-1].next_state
+        nth_done = self.nstep_buffer[-1].done
+
+        for i, transition in enumerate(self.nstep_buffer):
+            n_step_return += (self.gamma**i) * transition.reward
+            nth_state = transition.next_state
+            nth_done = transition.done
+            if transition.done:
+                break
+
+        return n_step_return, nth_state, nth_done
 
     def sample(self, batch_size: int) -> List[Transition]:
         """Sample a random batch of transitions."""
@@ -205,8 +240,33 @@ def batch_to_tensors(
         - Actions must be LongTensor for use with gather()
         - Dones should be float (0.0 or 1.0) for easy multiplication
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement batch_to_tensors")
+    states = torch.as_tensor(
+        np.stack([transition.state for transition in batch]),
+        dtype=torch.float32,
+        device=device,
+    )
+    actions = torch.as_tensor(
+        np.array([transition.action for transition in batch]),
+        dtype=torch.long,
+        device=device,
+    )
+    rewards = torch.as_tensor(
+        np.array([transition.reward for transition in batch]),
+        dtype=torch.float32,
+        device=device,
+    )
+    next_states = torch.as_tensor(
+        np.stack([transition.next_state for transition in batch]),
+        dtype=torch.float32,
+        device=device,
+    )
+    dones = torch.as_tensor(
+        np.array([transition.done for transition in batch]),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    return states, actions, rewards, next_states, dones
 
 
 # =============================================================================
@@ -237,8 +297,11 @@ def epsilon_greedy_action(
         - When epsilon=1, always return random action
         - For ties in Q-values, argmax returns the first occurrence
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement epsilon_greedy_action")
+    if np.random.random() < epsilon:
+        return int(np.random.randint(0, num_actions))
+
+    q_values = q_values.squeeze(0) if q_values.dim() == 2 else q_values
+    return int(torch.argmax(q_values).item())
 
 
 def linear_epsilon_decay(
@@ -264,8 +327,11 @@ def linear_epsilon_decay(
         - At step=0, epsilon should be epsilon_start
         - At step=decay_steps, epsilon should be epsilon_end
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement linear_epsilon_decay")
+    if step >= decay_steps:
+        return epsilon_end
+
+    frac = step / decay_steps
+    return epsilon_start + frac * (epsilon_end - epsilon_start)
 
 
 # =============================================================================
@@ -302,8 +368,9 @@ def compute_td_target(
         - Return detached targets to prevent gradients flowing through the target
           computation (consistent with compute_double_dqn_target which uses torch.no_grad())
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement compute_td_target")
+    max_next_q = next_q_values.max(dim=1).values
+    td_targets = rewards + gamma * max_next_q * (1.0 - dones)
+    return td_targets.detach()
 
 
 def compute_double_dqn_target(
@@ -343,8 +410,11 @@ def compute_double_dqn_target(
         - No gradients should flow through target computation (use torch.no_grad())
         - Use gather() to select Q-values for the chosen actions
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement compute_double_dqn_target")
+    with torch.no_grad():
+        next_actions = online_network(next_states).argmax(dim=1, keepdim=True)
+        next_q = target_network(next_states).gather(1, next_actions).squeeze(1)
+        td_targets = rewards + gamma * next_q * (1.0 - dones)
+    return td_targets
 
 
 # =============================================================================
@@ -378,8 +448,15 @@ def compute_td_loss(
         - Huber loss is more robust to outliers than MSE (default choice)
         - TD targets should be detached (no gradient flow through targets)
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement compute_td_loss")
+    chosen_q = q_values.gather(1, actions.long().unsqueeze(1)).squeeze(1)
+    targets = td_targets.detach()
+
+    if loss_type == "huber":
+        return F.smooth_l1_loss(chosen_q, targets)
+    if loss_type == "mse":
+        return F.mse_loss(chosen_q, targets)
+
+    raise ValueError(f"Unsupported loss_type: {loss_type}")
 
 
 # =============================================================================
@@ -410,8 +487,12 @@ def soft_update(
         - Update should be done in-place on target network parameters
         - No gradients should be computed for this operation
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement soft_update")
+    with torch.no_grad():
+        for target_param, online_param in zip(
+            target_network.parameters(), online_network.parameters()
+        ):
+            target_param.data.mul_(1.0 - tau)
+            target_param.data.add_(tau * online_param.data)
 
 
 def hard_update(online_network: nn.Module, target_network: nn.Module) -> None:
@@ -425,8 +506,7 @@ def hard_update(online_network: nn.Module, target_network: nn.Module) -> None:
         online_network: The Q-network being trained
         target_network: The target Q-network to update
     """
-    # TODO: Implement this
-    raise NotImplementedError("Implement hard_update")
+    target_network.load_state_dict(online_network.state_dict())
 
 
 # =============================================================================
